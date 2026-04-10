@@ -1,0 +1,27 @@
+# Transcript backups — large and potentially sensitive
+sessions/*.jsonl
+sessions/backup-*
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Environment / secrets
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+*.swp
+*.swo
+
+# Logs (keep flush.log and compile.log — they're useful for debugging)
+# sessions/*.log  # ← intentionally tracked

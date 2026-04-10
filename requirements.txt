@@ -1,0 +1,7 @@
+# Primary — uses Claude Code's built-in credentials (~/.claude/.credentials.json)
+# No separate API key needed when running inside Claude Code sessions
+claude-agent-sdk>=0.0.1
+
+# Fallback — only needed if claude-agent-sdk is unavailable or auth fails
+# Requires ANTHROPIC_API_KEY env var
+anthropic>=0.40.0
