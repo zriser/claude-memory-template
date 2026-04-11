@@ -123,8 +123,11 @@ def load_transcript(path: str) -> str | None:
         for line in lines:
             try:
                 entry = json.loads(line)
-                role = entry.get("role", "")
-                content = entry.get("content", "")
+                # Claude Code format: {type: "user"|"assistant", message: {role, content}}
+                # Fallback: flat {role, content}
+                msg = entry.get("message") if isinstance(entry.get("message"), dict) else entry
+                role = msg.get("role", "")
+                content = msg.get("content", "")
                 if isinstance(content, list):
                     text_parts = [
                         block.get("text", "")
@@ -335,6 +338,26 @@ def maybe_trigger_compile() -> None:
         )
         logging.info("Triggered compile.py (post-6pm)")
 
+# ── Transcript discovery ───────────────────────────────────────────────────────
+
+def find_latest_transcript() -> str | None:
+    """Find the most recently modified Claude session transcript."""
+    projects_dir = Path.home() / ".claude" / "projects"
+    if not projects_dir.exists():
+        return None
+
+    candidates = [
+        p for p in projects_dir.glob("*/*.jsonl")
+        if "subagents" not in p.parts
+    ]
+
+    if not candidates:
+        return None
+
+    latest = max(candidates, key=lambda p: p.stat().st_mtime)
+    return str(latest)
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -346,7 +369,11 @@ def main() -> None:
     )
 
     if not transcript_path:
-        logging.warning("No transcript path provided (CLAUDE_TRANSCRIPT_PATH not set)")
+        logging.info("No transcript path provided — searching ~/.claude/projects/")
+        transcript_path = find_latest_transcript() or ""
+
+    if not transcript_path:
+        logging.warning("No transcript found in ~/.claude/projects/")
         sys.exit(0)
 
     logging.info(f"Starting flush for: {transcript_path}")

@@ -1,0 +1,40 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "VAULT_PATH/.venv/bin/python VAULT_PATH/scripts/session-start.py",
+            "timeout": 8000
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'TRANSCRIPT=$(find ~/.claude/projects -maxdepth 2 -name \"*.jsonl\" ! -path \"*/subagents/*\" -printf \"%T@ %p\\n\" 2>/dev/null | sort -n | tail -1 | cut -d\" \" -f2-); [ -n \"$TRANSCRIPT\" ] && cp \"$TRANSCRIPT\" VAULT_PATH/sessions/backup-$(date +%Y%m%d-%H%M%S).jsonl 2>/dev/null || true'",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'VAULT_PATH/.venv/bin/python VAULT_PATH/scripts/flush.py >> VAULT_PATH/sessions/flush.log 2>&1 &'",
+            "timeout": 3000
+          }
+        ]
+      }
+    ]
+  }
+}
