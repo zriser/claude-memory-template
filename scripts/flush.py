@@ -154,12 +154,15 @@ def load_transcript(path: str) -> str | None:
 async def _extract_with_sdk(transcript: str) -> str:
     """Run extraction via the Claude Agent SDK (no API key required)."""
     result = ""
+    stderr_lines: list[str] = []
+
     async for message in sdk_query(
         prompt=EXTRACTION_PROMPT + transcript,
         options=ClaudeAgentOptions(
             cwd=str(VAULT),
             allowed_tools=[],
             max_turns=2,
+            stderr=lambda line: stderr_lines.append(line),
         ),
     ):
         if isinstance(message, AssistantMessage):
@@ -170,6 +173,10 @@ async def _extract_with_sdk(transcript: str) -> str:
             cost = message.total_cost_usd or 0.0
             if cost:
                 logging.info(f"SDK cost: ${cost:.4f}")
+
+    if stderr_lines:
+        logging.warning(f"SDK stderr: {''.join(stderr_lines[:20])}")
+
     return result.strip()
 
 # ── Extraction — anthropic SDK (fallback) ─────────────────────────────────────
