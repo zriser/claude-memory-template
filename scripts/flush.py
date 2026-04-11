@@ -326,7 +326,7 @@ def extract_knowledge(transcript: str) -> dict | None:
 
 # ── Daily log writer ───────────────────────────────────────────────────────────
 
-def write_daily_log(knowledge: dict, date: datetime.date) -> Path:
+def write_daily_log(knowledge: dict, date: datetime.date, transcript_path: str = "") -> Path:
     """Append extracted knowledge to today's daily log.
 
     Uses fcntl.flock (non-blocking) to serialize concurrent writes from
@@ -348,7 +348,7 @@ compiled: false
 # Session Log — {date.strftime("%A, %B %d, %Y")}
 """)
 
-    sections.append(f"\n## Session extracted at {now}\n")
+    sections.append(f"\n## Session extracted at {now}\n**source:** {Path(transcript_path).name}\n")
 
     for item in knowledge.get("decisions", []):
         sections.append(f"""\
@@ -445,6 +445,17 @@ def find_latest_transcript() -> str | None:
     return str(latest)
 
 
+# ── Dedup guard ───────────────────────────────────────────────────────────────
+
+def already_processed_today(transcript_path: str) -> bool:
+    """Return True if this transcript's filename appears in today's daily log."""
+    filename = Path(transcript_path).name
+    log_path = DAILY_DIR / f"{datetime.date.today().isoformat()}.md"
+    if not log_path.exists():
+        return False
+    return f"source: {filename}" in log_path.read_text(encoding="utf-8")
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -480,6 +491,10 @@ def main() -> None:
             logging.info("Skipping own project transcript")
             sys.exit(0)
 
+        if already_processed_today(transcript_path):
+            logging.info("Transcript already processed today — skipping")
+            sys.exit(0)
+
         logging.info(f"Starting flush for: {transcript_path}")
 
         transcript = load_transcript(transcript_path)
@@ -495,7 +510,7 @@ def main() -> None:
             sys.exit(1)
 
         today = datetime.date.today()
-        log_path = write_daily_log(knowledge, today)
+        log_path = write_daily_log(knowledge, today, transcript_path)
 
         total = sum(len(v) for v in knowledge.values() if isinstance(v, list))
         logging.info(f"Wrote {total} items to {log_path}")
