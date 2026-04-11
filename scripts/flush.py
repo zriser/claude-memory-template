@@ -19,6 +19,7 @@ import asyncio
 import datetime
 import json
 import logging
+import logging.handlers
 import os
 import sys
 import traceback
@@ -93,11 +94,15 @@ if AGENT_SDK_AVAILABLE:
 
 def setup_logging() -> None:
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    logging.basicConfig(
-        filename=str(LOG_FILE),
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
+    handler = logging.handlers.RotatingFileHandler(
+        str(LOG_FILE),
+        maxBytes=500_000,  # 500 KB per file
+        backupCount=2,     # keeps flush.log, flush.log.1, flush.log.2
+        encoding="utf-8",
     )
+    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    logging.getLogger().addHandler(handler)
+    logging.getLogger().setLevel(logging.INFO)
 
 # ── Transcript loading ─────────────────────────────────────────────────────────
 
