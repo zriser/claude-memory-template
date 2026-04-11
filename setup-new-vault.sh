@@ -242,7 +242,7 @@ cat > "$VAULT/hooks/settings-snippet.json" << TMPL
       {"type": "command", "command": "bash -c 'if [ -n \"\$CLAUDE_TRANSCRIPT_PATH\" ]; then cp \"\$CLAUDE_TRANSCRIPT_PATH\" $VAULT/sessions/backup-\$(date +%Y%m%d-%H%M%S).jsonl 2>/dev/null || true; fi'", "timeout": 5000}
     ]}],
     "Stop": [{"matcher": "", "hooks": [
-      {"type": "command", "command": "bash -c '$PYBIN $VAULT/scripts/flush.py \"\$CLAUDE_TRANSCRIPT_PATH\" >> $VAULT/sessions/flush.log 2>&1 &'", "timeout": 3000}
+      {"type": "command", "command": "bash -c '[ -n \"\$CLAUDE_TRANSCRIPT_PATH\" ] && $PYBIN $VAULT/scripts/flush.py \"\$CLAUDE_TRANSCRIPT_PATH\" >> $VAULT/sessions/flush.log 2>&1 &'", "timeout": 3000}
     ]}]
   }
 }
