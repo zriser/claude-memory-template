@@ -1,4 +1,19 @@
 {
+  "_comment": "Merge this into your ~/.claude/settings.json under the 'hooks' key.",
+  "_instructions": [
+    "1. Open ~/.claude/settings.json",
+    "2. Add or merge the 'hooks' object below into your existing settings",
+    "3. Replace VAULT_PATH with the absolute path to your claude-memory directory",
+    "4. The PreCompact hook backs up transcripts before context compaction",
+    "",
+    "IMPORTANT — Do NOT add a Stop hook for flush.py:",
+    "  Stop fires on EVERY assistant response, not just at session end.",
+    "  In a 50-turn tmux session this spawns O(50) concurrent flush.py processes,",
+    "  each making a full LLM API call. This is what caused the $1.80 runaway on",
+    "  2026-04-11. SessionEnd fires once at true session exit and is the correct hook.",
+    "  SessionEnd is not yet wired — enable it only after confirming flush.py works",
+    "  correctly with a manually triggered test run."
+  ],
   "hooks": {
     "SessionStart": [
       {
@@ -6,7 +21,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "VAULT_PATH/.venv/bin/python VAULT_PATH/scripts/session-start.py",
+            "command": "python3 VAULT_PATH/scripts/session-start.py",
             "timeout": 8000
           }
         ]
@@ -18,20 +33,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -c 'TRANSCRIPT=$(find ~/.claude/projects -maxdepth 2 -name \"*.jsonl\" ! -path \"*/subagents/*\" -printf \"%T@ %p\\n\" 2>/dev/null | sort -n | tail -1 | cut -d\" \" -f2-); [ -n \"$TRANSCRIPT\" ] && cp \"$TRANSCRIPT\" VAULT_PATH/sessions/backup-$(date +%Y%m%d-%H%M%S).jsonl 2>/dev/null || true'",
+            "command": "bash -c 'if [ -n \"$CLAUDE_TRANSCRIPT_PATH\" ]; then cp \"$CLAUDE_TRANSCRIPT_PATH\" VAULT_PATH/sessions/backup-$(date +%Y%m%d-%H%M%S).jsonl 2>/dev/null || true; fi'",
             "timeout": 5000
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash -c 'VAULT_PATH/.venv/bin/python VAULT_PATH/scripts/flush.py >> VAULT_PATH/sessions/flush.log 2>&1 &'",
-            "timeout": 3000
           }
         ]
       }

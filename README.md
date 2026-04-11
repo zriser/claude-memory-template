@@ -55,7 +55,7 @@ python3 scripts/utils.py  # not a runnable script, but imports work for testing
 ### Your own vault (first time)
 
 ```bash
-git clone https://github.com/zriser/claude-memory-template.git ~/claude-memory
+git clone git@github.com:zriser/claude-memory.git ~/claude-memory
 cd ~/claude-memory
 bash setup-new-vault.sh
 ```
@@ -191,7 +191,7 @@ wiki articles) is personal. To give a colleague their own independent vault:
 1. **They fork this repo** on GitHub (or you share the URL so they can clone it)
 2. **They run the setup script:**
    ```bash
-   git clone https://github.com/zriser/claude-memory-template.git ~/claude-memory
+   git clone git@github.com:<fork>/claude-memory.git ~/claude-memory
    cd ~/claude-memory
    bash setup-new-vault.sh
    ```

@@ -145,7 +145,7 @@ def check_missing_frontmatter(articles: dict[str, str]) -> list[str]:
 # ── Contradiction check — Agent SDK (primary) ─────────────────────────────────
 
 SDK_CONTRADICTION_PROMPT = """\
-You are auditing Zach's personal knowledge base at {vault} for quality issues.
+You are auditing the user's personal knowledge base at {vault} for quality issues.
 
 Use Glob and Read tools to examine all articles in:
   wiki/, brain/, patterns/, mistakes/

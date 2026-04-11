@@ -102,15 +102,31 @@ def get_git_status() -> str:
         pass
     return ""
 
-def get_memory_index_preview() -> str:
-    """Return the MEMORY.md index (it's small by design)."""
+def get_memory_index_preview(max_chars: int = 4000) -> str:
+    """Return the MEMORY.md index, capped at max_chars to prevent context bloat."""
     if not MEMORY_FILE.exists():
         return ""
     content = MEMORY_FILE.read_text(encoding="utf-8")
-    # Remove HTML comments
     import re
     content = re.sub(r'<!--.*?-->', '', content, flags=re.DOTALL)
-    return content.strip()
+    content = content.strip()
+    if len(content) > max_chars:
+        content = content[:max_chars] + "\n...[truncated]"
+    return content
+
+
+def rotate_session_backups(max_age_days: int = 30) -> None:
+    """Delete sessions/backup-*.jsonl files older than max_age_days."""
+    sessions_dir = VAULT / "sessions"
+    if not sessions_dir.exists():
+        return
+    cutoff = datetime.datetime.now().timestamp() - max_age_days * 86400
+    for backup in sessions_dir.glob("backup-*.jsonl"):
+        try:
+            if backup.stat().st_mtime < cutoff:
+                backup.unlink()
+        except OSError:
+            pass
 
 def build_context() -> str:
     """Assemble the full context string."""
@@ -142,6 +158,7 @@ def build_context() -> str:
     return "\n\n---\n\n".join(sections)
 
 def main():
+    rotate_session_backups()
     try:
         context = build_context()
 

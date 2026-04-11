@@ -47,7 +47,7 @@ if AGENT_SDK_AVAILABLE:
 # ── Agent SDK path (primary) ──────────────────────────────────────────────────
 
 SDK_QUERY_PROMPT = """\
-You are querying Zach's personal knowledge base stored in {vault}.
+You are querying the user's personal knowledge base stored in {vault}.
 
 The knowledge base is organized as:
   wiki/          — compiled concept articles
@@ -127,7 +127,7 @@ async def _query_with_sdk(question: str, file_back: bool) -> str:
 # ── Fallback: keyword search + anthropic SDK ──────────────────────────────────
 
 FALLBACK_QUERY_PROMPT = """\
-You are querying Zach's personal knowledge base. Use the provided articles to answer \
+You are querying the user's personal knowledge base. Use the provided articles to answer \
 his question accurately and concisely.
 
 Rules:

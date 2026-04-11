@@ -2,11 +2,15 @@
 """
 flush.py — Session-end knowledge extractor.
 
-Called by the Stop hook. Reads the session transcript, uses the Claude Agent
-SDK (via Claude Code's built-in credentials) to extract decisions, patterns,
-mistakes, and concepts, then appends them to the daily log.
+Reads the session transcript, uses the Claude Agent SDK (via Claude Code's
+built-in credentials) to extract decisions, patterns, mistakes, and concepts,
+then appends them to the daily log.
 
 Must run as a background process — does not block session exit.
+
+WARNING: Do NOT wire this to the Stop hook. Stop fires on every assistant
+response, not just at session end, causing O(N) concurrent process accumulation
+per session in tmux and other multiplexed environments. Use SessionEnd only.
 
 Primary:  claude_agent_sdk  (uses ~/.claude/.credentials.json — no API key needed)
 Fallback: anthropic SDK     (requires ANTHROPIC_API_KEY env var)
@@ -17,10 +21,12 @@ Usage: python3 flush.py [transcript_path]
 
 import asyncio
 import datetime
+import fcntl
 import json
 import logging
 import logging.handlers
 import os
+import signal
 import sys
 import traceback
 from pathlib import Path
@@ -34,7 +40,14 @@ from utils import call_claude_pipe, AGENT_SDK_AVAILABLE as _SDK_AVAIL  # noqa: E
 VAULT = Path(__file__).parent.parent
 DAILY_DIR = VAULT / "daily"
 LOG_FILE = VAULT / "sessions" / "flush.log"
+COST_LOG_FILE = VAULT / "sessions" / "cost.log"
+FLUSH_LOCK_FILE = Path("/tmp/claude-memory-flush.lock")
 MAX_TRANSCRIPT_CHARS = 80_000
+COST_WARN_USD = 0.50
+# NOTE: This is a write-gate, not a spend-gate. The API call completes before
+# this threshold is checked; only the result write is aborted.
+COST_ABORT_USD = 2.00
+WALL_CLOCK_LIMIT = 120  # seconds — SIGALRM kills the process if exceeded
 
 EXTRACTION_PROMPT = """\
 You are a knowledge extractor for a personal memory system. Analyze this Claude \
@@ -104,6 +117,26 @@ def setup_logging() -> None:
     logging.getLogger().addHandler(handler)
     logging.getLogger().setLevel(logging.INFO)
 
+# ── Wall-clock timeout ────────────────────────────────────────────────────────
+
+def _timeout_handler(signum: int, frame) -> None:
+    logging.error(
+        f"flush.py exceeded {WALL_CLOCK_LIMIT}s wall-clock limit — aborting"
+    )
+    sys.exit(1)
+
+# ── Cost logging ──────────────────────────────────────────────────────────────
+
+def write_cost_log(tier: str, cost_usd: float) -> None:
+    """Append one cost record to sessions/cost.log."""
+    try:
+        ts = datetime.datetime.now().isoformat(timespec="seconds")
+        COST_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(COST_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"{ts} flush.py {tier} ${cost_usd:.4f}\n")
+    except Exception:
+        pass  # cost log is best-effort
+
 # ── Transcript loading ─────────────────────────────────────────────────────────
 
 def load_transcript(path: str) -> str | None:
@@ -151,9 +184,13 @@ def load_transcript(path: str) -> str | None:
 
 # ── Extraction — Agent SDK (primary) ──────────────────────────────────────────
 
-async def _extract_with_sdk(transcript: str) -> str:
-    """Run extraction via the Claude Agent SDK (no API key required)."""
+async def _extract_with_sdk(transcript: str) -> tuple[str, float]:
+    """Run extraction via the Claude Agent SDK (no API key required).
+
+    Returns (raw_text, cost_usd).
+    """
     result = ""
+    cost_usd = 0.0
     stderr_lines: list[str] = []
 
     async for message in sdk_query(
@@ -170,14 +207,14 @@ async def _extract_with_sdk(transcript: str) -> str:
                 if isinstance(block, TextBlock):
                     result += block.text
         elif isinstance(message, ResultMessage):
-            cost = message.total_cost_usd or 0.0
-            if cost:
-                logging.info(f"SDK cost: ${cost:.4f}")
+            cost_usd = message.total_cost_usd or 0.0
+            if cost_usd:
+                logging.info(f"SDK cost: ${cost_usd:.4f}")
 
     if stderr_lines:
         logging.warning(f"SDK stderr: {''.join(stderr_lines[:20])}")
 
-    return result.strip()
+    return result.strip(), cost_usd
 
 # ── Extraction — anthropic SDK (fallback) ─────────────────────────────────────
 
@@ -211,8 +248,31 @@ def _extract_with_api(transcript: str) -> str | None:
 
 # ── Dispatcher ─────────────────────────────────────────────────────────────────
 
+def _check_cost(cost_usd: float, tier: str) -> bool:
+    """Log warning or abort based on cost thresholds. Returns False if aborted.
+
+    NOTE: This is a write-gate. The API call has already completed and the cost
+    is already incurred. Aborting here only prevents writing the result to disk.
+    """
+    write_cost_log(tier, cost_usd)
+    if cost_usd >= COST_ABORT_USD:
+        logging.error(
+            f"Cost guard triggered: ${cost_usd:.4f} exceeds abort threshold "
+            f"(${COST_ABORT_USD:.2f}) — aborting flush"
+        )
+        return False
+    if cost_usd >= COST_WARN_USD:
+        logging.warning(
+            f"Cost guard: ${cost_usd:.4f} exceeds warning threshold (${COST_WARN_USD:.2f})"
+        )
+    return True
+
+
 def extract_knowledge(transcript: str) -> dict | None:
-    """Extract knowledge, preferring Agent SDK, falling back to direct API."""
+    """Extract knowledge, preferring Agent SDK, falling back to direct API.
+
+    Attempts each auth tier exactly once. No retry loop.
+    """
     raw: str | None = None
 
     # Tier 1: Agent SDK
@@ -220,7 +280,9 @@ def extract_knowledge(transcript: str) -> dict | None:
         logging.info("Tier 1: Claude Agent SDK")
         print("flush.py: Tier 1 — Claude Agent SDK (subscription credentials)", flush=True)
         try:
-            raw = asyncio.run(_extract_with_sdk(transcript))
+            raw, cost = asyncio.run(_extract_with_sdk(transcript))
+            if not _check_cost(cost, "tier1-sdk"):
+                return None
         except Exception as e:
             logging.error(f"Tier 1 failed: {e}\n{traceback.format_exc()}")
             print(f"flush.py: Tier 1 failed ({type(e).__name__}), trying Tier 2", flush=True)
@@ -231,6 +293,8 @@ def extract_knowledge(transcript: str) -> dict | None:
         print("flush.py: Tier 2 — ANTHROPIC_API_KEY", flush=True)
         try:
             raw = _extract_with_api(transcript)
+            if raw is not None:
+                write_cost_log("tier2-api", 0.0)  # direct API cost not tracked here
         except Exception as e:
             logging.error(f"Tier 2 failed: {e}")
             print(f"flush.py: Tier 2 failed ({type(e).__name__}), trying Tier 3", flush=True)
@@ -240,6 +304,8 @@ def extract_knowledge(transcript: str) -> dict | None:
         logging.info("Tier 3: claude -p subprocess")
         print("flush.py: Tier 3 — claude -p subprocess fallback", flush=True)
         raw = call_claude_pipe(EXTRACTION_PROMPT + transcript, timeout=180)
+        if raw is not None:
+            write_cost_log("tier3-pipe", 0.0)
 
     if not raw:
         return None
@@ -260,7 +326,11 @@ def extract_knowledge(transcript: str) -> dict | None:
 # ── Daily log writer ───────────────────────────────────────────────────────────
 
 def write_daily_log(knowledge: dict, date: datetime.date) -> Path:
-    """Append extracted knowledge to today's daily log."""
+    """Append extracted knowledge to today's daily log.
+
+    Uses fcntl.flock (non-blocking) to serialize concurrent writes from
+    multiple flush.py instances. Skips write if lock cannot be acquired.
+    """
     DAILY_DIR.mkdir(parents=True, exist_ok=True)
     log_path = DAILY_DIR / f"{date.isoformat()}.md"
     now = datetime.datetime.now().strftime("%H:%M")
@@ -325,8 +395,17 @@ compiled: false
     if total == 0:
         sections.append("*No significant knowledge extracted from this session.*\n")
 
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write("\n".join(sections))
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                logging.warning("Daily log locked by concurrent flush — skipping write")
+                return log_path
+            f.write("\n".join(sections))
+            # Lock releases automatically when file closes
+    except Exception as e:
+        logging.error(f"write_daily_log failed: {e}")
 
     return log_path
 
@@ -370,41 +449,58 @@ def find_latest_transcript() -> str | None:
 def main() -> None:
     setup_logging()
 
-    transcript_path = (
-        sys.argv[1] if len(sys.argv) > 1
-        else os.environ.get("CLAUDE_TRANSCRIPT_PATH", "")
-    )
-
-    if not transcript_path:
-        logging.info("No transcript path provided — searching ~/.claude/projects/")
-        transcript_path = find_latest_transcript() or ""
-
-    if not transcript_path:
-        logging.warning("No transcript found in ~/.claude/projects/")
+    # ── Exclusive process lock — bail if another flush is already running ──
+    try:
+        lock_fd = open(FLUSH_LOCK_FILE, "w")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        logging.info("Another flush.py is already running — exiting")
         sys.exit(0)
 
-    logging.info(f"Starting flush for: {transcript_path}")
+    # ── Wall-clock timeout via SIGALRM ────────────────────────────────────
+    signal.signal(signal.SIGALRM, _timeout_handler)
+    signal.alarm(WALL_CLOCK_LIMIT)
 
-    transcript = load_transcript(transcript_path)
-    if not transcript:
-        logging.warning("Empty or unreadable transcript — skipping")
-        sys.exit(0)
+    try:
+        transcript_path = (
+            sys.argv[1] if len(sys.argv) > 1
+            else os.environ.get("CLAUDE_TRANSCRIPT_PATH", "")
+        )
 
-    logging.info(f"Loaded transcript ({len(transcript)} chars)")
+        if not transcript_path:
+            logging.warning(
+                "No transcript path provided via argv or CLAUDE_TRANSCRIPT_PATH — "
+                "the hook should supply this. Exiting without processing."
+            )
+            sys.exit(0)
 
-    knowledge = extract_knowledge(transcript)
-    if not knowledge:
-        logging.error("Extraction failed — skipping daily log write")
-        sys.exit(1)
+        logging.info(f"Starting flush for: {transcript_path}")
 
-    today = datetime.date.today()
-    log_path = write_daily_log(knowledge, today)
+        transcript = load_transcript(transcript_path)
+        if not transcript:
+            logging.warning("Empty or unreadable transcript — skipping")
+            sys.exit(0)
 
-    total = sum(len(v) for v in knowledge.values() if isinstance(v, list))
-    logging.info(f"Wrote {total} items to {log_path}")
+        logging.info(f"Loaded transcript ({len(transcript)} chars)")
 
-    maybe_trigger_compile()
-    logging.info("Flush complete")
+        knowledge = extract_knowledge(transcript)
+        if not knowledge:
+            logging.error("Extraction failed — skipping daily log write")
+            sys.exit(1)
+
+        today = datetime.date.today()
+        log_path = write_daily_log(knowledge, today)
+
+        total = sum(len(v) for v in knowledge.values() if isinstance(v, list))
+        logging.info(f"Wrote {total} items to {log_path}")
+
+        maybe_trigger_compile()
+        logging.info("Flush complete")
+
+    finally:
+        signal.alarm(0)  # cancel the alarm
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        lock_fd.close()
 
 
 if __name__ == "__main__":
