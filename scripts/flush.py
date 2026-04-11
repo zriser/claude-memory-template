@@ -199,6 +199,7 @@ async def _extract_with_sdk(transcript: str) -> tuple[str, float]:
             cwd=str(VAULT),
             allowed_tools=[],
             max_turns=2,
+            permission_mode="acceptEdits",
             stderr=lambda line: stderr_lines.append(line),
         ),
     ):
@@ -453,8 +454,9 @@ def main() -> None:
     try:
         lock_fd = open(FLUSH_LOCK_FILE, "w")
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        logging.info("Lock acquired")
     except BlockingIOError:
-        logging.info("Another flush.py is already running — exiting")
+        logging.info("Lock exists, exiting")
         sys.exit(0)
 
     # ── Wall-clock timeout via SIGALRM ────────────────────────────────────
@@ -472,6 +474,10 @@ def main() -> None:
                 "No transcript path provided via argv or CLAUDE_TRANSCRIPT_PATH — "
                 "the hook should supply this. Exiting without processing."
             )
+            sys.exit(0)
+
+        if "claude-memory" in transcript_path:
+            logging.info("Skipping own project transcript")
             sys.exit(0)
 
         logging.info(f"Starting flush for: {transcript_path}")
