@@ -26,6 +26,7 @@ MEMORY_FILE = VAULT / "MEMORY.md"
 MAX_DAILY_CHARS = 2000
 MAX_PROJECT_CHARS = 500
 
+
 def get_recent_daily_logs(days: int = 3) -> str:
     """Return content from the last N daily logs."""
     today = datetime.date.today()
@@ -53,6 +54,7 @@ def get_recent_daily_logs(days: int = 3) -> str:
 
     return combined
 
+
 def get_active_projects() -> str:
     """Return summaries of active projects."""
     if not ACTIVE_DIR.exists():
@@ -72,6 +74,7 @@ def get_active_projects() -> str:
 
     return "\n\n".join(parts)
 
+
 def get_urgent_items() -> str:
     """Extract items tagged 'urgent' from MEMORY.md."""
     if not MEMORY_FILE.exists():
@@ -85,6 +88,7 @@ def get_urgent_items() -> str:
     ]
 
     return "\n".join(urgent_lines)
+
 
 def get_git_status() -> str:
     """Return a brief git status of the memory vault."""
@@ -102,13 +106,15 @@ def get_git_status() -> str:
         pass
     return ""
 
+
 def get_memory_index_preview(max_chars: int = 4000) -> str:
     """Return the MEMORY.md index, capped at max_chars to prevent context bloat."""
     if not MEMORY_FILE.exists():
         return ""
     content = MEMORY_FILE.read_text(encoding="utf-8")
     import re
-    content = re.sub(r'<!--.*?-->', '', content, flags=re.DOTALL)
+
+    content = re.sub(r"<!--.*?-->", "", content, flags=re.DOTALL)
     content = content.strip()
     if len(content) > max_chars:
         content = content[:max_chars] + "\n...[truncated]"
@@ -127,6 +133,7 @@ def rotate_session_backups(max_age_days: int = 30) -> None:
                 backup.unlink()
         except OSError:
             pass
+
 
 def build_context() -> str:
     """Assemble the full context string."""
@@ -157,15 +164,14 @@ def build_context() -> str:
 
     return "\n\n---\n\n".join(sections)
 
+
 def main():
     rotate_session_backups()
     try:
         context = build_context()
 
         # Output as Claude Code hook JSON format
-        output = {
-            "additionalContext": f"# Claude Memory Context\n\n{context}"
-        }
+        output = {"additionalContext": f"# Claude Memory Context\n\n{context}"}
         print(json.dumps(output))
 
     except Exception as e:

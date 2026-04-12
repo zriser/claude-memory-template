@@ -81,6 +81,7 @@ updated: {today}
 ---
 """
 
+
 async def _query_with_sdk(question: str, file_back: bool) -> str:
     """Agent searches the vault with tools and synthesizes an answer."""
     today = datetime.date.today().isoformat()
@@ -124,6 +125,7 @@ async def _query_with_sdk(question: str, file_back: bool) -> str:
 
     return answer.strip()
 
+
 # ── Fallback: keyword search + anthropic SDK ──────────────────────────────────
 
 FALLBACK_QUERY_PROMPT = """\
@@ -142,6 +144,7 @@ KNOWLEDGE BASE CONTEXT:
 QUESTION: {question}
 """
 
+
 def _load_all_articles() -> dict[str, str]:
     articles = {}
     for search_dir in [WIKI_DIR, BRAIN_DIR, PATTERNS_DIR, MISTAKES_DIR]:
@@ -152,8 +155,9 @@ def _load_all_articles() -> dict[str, str]:
             articles[rel] = md_file.read_text(encoding="utf-8")
     return articles
 
+
 def _find_relevant(question: str, articles: dict[str, str]) -> list[tuple[str, str]]:
-    keywords = re.findall(r'\b\w{4,}\b', question.lower())
+    keywords = re.findall(r"\b\w{4,}\b", question.lower())
     scored = []
     for path, content in articles.items():
         score = sum(content.lower().count(kw) for kw in keywords)
@@ -169,10 +173,11 @@ def _find_relevant(question: str, articles: dict[str, str]) -> list[tuple[str, s
         total_chars += len(content)
     return result
 
+
 def _save_answer_to_wiki(question: str, answer: str) -> None:
     today = datetime.date.today().isoformat()
-    slug = re.sub(r'[^\w\s-]', '', question.lower())
-    slug = re.sub(r'[\s_]+', '-', slug)[:50]
+    slug = re.sub(r"[^\w\s-]", "", question.lower())
+    slug = re.sub(r"[\s_]+", "-", slug)[:50]
     content = f"""\
 ---
 title: "Q&A: {question[:60]}"
@@ -193,6 +198,7 @@ updated: {today}
     out_path.write_text(content, encoding="utf-8")
     print(f"\nSaved to: {out_path}")
 
+
 def _query_with_api(question: str, file_back: bool) -> str | None:
     """Fallback: keyword search + direct Anthropic API synthesis."""
     try:
@@ -206,7 +212,9 @@ def _query_with_api(question: str, file_back: bool) -> str | None:
 
     articles = _load_all_articles()
     if not articles:
-        return "Knowledge base is empty. Run a session and let flush.py populate it first."
+        return (
+            "Knowledge base is empty. Run a session and let flush.py populate it first."
+        )
 
     relevant = _find_relevant(question, articles)
     if not relevant:
@@ -229,7 +237,9 @@ def _query_with_api(question: str, file_back: bool) -> str | None:
     except Exception as e:
         return f"ERROR: API call failed: {e}"
 
+
 # ── Dispatcher ─────────────────────────────────────────────────────────────────
+
 
 def run_query(question: str, file_back: bool) -> str | None:
     # Tier 1: Agent SDK (searches vault with file tools)
@@ -261,7 +271,9 @@ def run_query(question: str, file_back: bool) -> str | None:
         _save_answer_to_wiki(question, result)
     return result or "All tiers failed — no response from claude -p."
 
+
 # ── Interactive mode ───────────────────────────────────────────────────────────
+
 
 def interactive_mode() -> None:
     print("Claude Memory Query — interactive mode")
@@ -289,14 +301,22 @@ def interactive_mode() -> None:
             last_question = question
             last_answer = answer
 
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Query the Claude Memory knowledge base")
+    parser = argparse.ArgumentParser(
+        description="Query the Claude Memory knowledge base"
+    )
     parser.add_argument("question", nargs="?", help="Question to ask")
     parser.add_argument("--file-back", action="store_true", help="Save answer to wiki")
-    parser.add_argument("--interactive", "-i", action="store_true", help="Interactive mode")
-    parser.add_argument("--list", action="store_true", help="List all articles in the vault")
+    parser.add_argument(
+        "--interactive", "-i", action="store_true", help="Interactive mode"
+    )
+    parser.add_argument(
+        "--list", action="store_true", help="List all articles in the vault"
+    )
     args = parser.parse_args()
 
     if args.interactive:

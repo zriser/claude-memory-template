@@ -27,6 +27,7 @@ try:
         TextBlock,
         query as sdk_query,
     )
+
     AGENT_SDK_AVAILABLE = True
 except ImportError:
     AGENT_SDK_AVAILABLE = False
@@ -34,11 +35,13 @@ except ImportError:
 
 # ── Tier 2 detection ──────────────────────────────────────────────────────────
 
+
 def api_key_available() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY"))
 
 
 # ── Tier 3: claude -p subprocess ─────────────────────────────────────────────
+
 
 def call_claude_pipe(prompt: str, timeout: int = 120) -> str | None:
     """
@@ -69,7 +72,9 @@ def call_claude_pipe(prompt: str, timeout: int = 120) -> str | None:
         )
         output = result.stdout.strip()
         if result.returncode != 0:
-            _warn(f"claude -p exited {result.returncode}: {result.stderr.strip()[:200]}")
+            _warn(
+                f"claude -p exited {result.returncode}: {result.stderr.strip()[:200]}"
+            )
             return None
         if not output:
             _warn("claude -p returned empty output")
@@ -93,17 +98,24 @@ def _warn(msg: str) -> None:
 
 # ── Convenience: print active tier ───────────────────────────────────────────
 
+
 def print_auth_status() -> None:
     """Print which auth tiers are available (useful for debugging)."""
-    print(f"  Tier 1 (Agent SDK):    {'✓ available' if AGENT_SDK_AVAILABLE else '✗ not installed'}")
-    print(f"  Tier 2 (API key):      {'✓ set' if api_key_available() else '✗ ANTHROPIC_API_KEY not set'}")
+    print(
+        f"  Tier 1 (Agent SDK):    {'✓ available' if AGENT_SDK_AVAILABLE else '✗ not installed'}"
+    )
+    print(
+        f"  Tier 2 (API key):      {'✓ set' if api_key_available() else '✗ ANTHROPIC_API_KEY not set'}"
+    )
     # Check if claude CLI exists
     try:
         subprocess.run(["claude", "--version"], capture_output=True, timeout=5)
         cli_ok = True
     except (FileNotFoundError, subprocess.TimeoutExpired):
         cli_ok = False
-    print(f"  Tier 3 (claude -p):    {'✓ available' if cli_ok else '✗ claude not in PATH'}")
+    print(
+        f"  Tier 3 (claude -p):    {'✓ available' if cli_ok else '✗ claude not in PATH'}"
+    )
 
 
 if __name__ == "__main__":

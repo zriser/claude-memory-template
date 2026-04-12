@@ -105,27 +105,30 @@ if AGENT_SDK_AVAILABLE:
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
+
 def setup_logging() -> None:
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     handler = logging.handlers.RotatingFileHandler(
         str(LOG_FILE),
         maxBytes=500_000,  # 500 KB per file
-        backupCount=2,     # keeps flush.log, flush.log.1, flush.log.2
+        backupCount=2,  # keeps flush.log, flush.log.1, flush.log.2
         encoding="utf-8",
     )
     handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
     logging.getLogger().addHandler(handler)
     logging.getLogger().setLevel(logging.INFO)
 
+
 # ── Wall-clock timeout ────────────────────────────────────────────────────────
 
+
 def _timeout_handler(signum: int, frame) -> None:
-    logging.error(
-        f"flush.py exceeded {WALL_CLOCK_LIMIT}s wall-clock limit — aborting"
-    )
+    logging.error(f"flush.py exceeded {WALL_CLOCK_LIMIT}s wall-clock limit — aborting")
     sys.exit(1)
 
+
 # ── Cost logging ──────────────────────────────────────────────────────────────
+
 
 def write_cost_log(tier: str, cost_usd: float) -> None:
     """Append one cost record to sessions/cost.log."""
@@ -137,7 +140,9 @@ def write_cost_log(tier: str, cost_usd: float) -> None:
     except Exception:
         pass  # cost log is best-effort
 
+
 # ── Transcript loading ─────────────────────────────────────────────────────────
+
 
 def load_transcript(path: str) -> str | None:
     """Load and trim a JSONL transcript file into readable turn text."""
@@ -158,7 +163,11 @@ def load_transcript(path: str) -> str | None:
                 entry = json.loads(line)
                 # Claude Code format: {type: "user"|"assistant", message: {role, content}}
                 # Fallback: flat {role, content}
-                msg = entry.get("message") if isinstance(entry.get("message"), dict) else entry
+                msg = (
+                    entry.get("message")
+                    if isinstance(entry.get("message"), dict)
+                    else entry
+                )
                 role = msg.get("role", "")
                 content = msg.get("content", "")
                 if isinstance(content, list):
@@ -182,7 +191,9 @@ def load_transcript(path: str) -> str | None:
         logging.error(f"Failed to load transcript: {e}")
         return None
 
+
 # ── Extraction — Agent SDK (primary) ──────────────────────────────────────────
+
 
 async def _extract_with_sdk(transcript: str) -> tuple[str, float]:
     """Run extraction via the Claude Agent SDK (no API key required).
@@ -217,7 +228,9 @@ async def _extract_with_sdk(transcript: str) -> tuple[str, float]:
 
     return result.strip(), cost_usd
 
+
 # ── Extraction — anthropic SDK (fallback) ─────────────────────────────────────
+
 
 def _extract_with_api(transcript: str) -> str | None:
     """Fallback extraction via direct Anthropic API (requires ANTHROPIC_API_KEY)."""
@@ -247,7 +260,9 @@ def _extract_with_api(transcript: str) -> str | None:
         logging.error(f"Fallback API call failed: {e}")
         return None
 
+
 # ── Dispatcher ─────────────────────────────────────────────────────────────────
+
 
 def _check_cost(cost_usd: float, tier: str) -> bool:
     """Log warning or abort based on cost thresholds. Returns False if aborted.
@@ -279,14 +294,19 @@ def extract_knowledge(transcript: str) -> dict | None:
     # Tier 1: Agent SDK
     if AGENT_SDK_AVAILABLE:
         logging.info("Tier 1: Claude Agent SDK")
-        print("flush.py: Tier 1 — Claude Agent SDK (subscription credentials)", flush=True)
+        print(
+            "flush.py: Tier 1 — Claude Agent SDK (subscription credentials)", flush=True
+        )
         try:
             raw, cost = asyncio.run(_extract_with_sdk(transcript))
             if not _check_cost(cost, "tier1-sdk"):
                 return None
         except Exception as e:
             logging.error(f"Tier 1 failed: {e}\n{traceback.format_exc()}")
-            print(f"flush.py: Tier 1 failed ({type(e).__name__}), trying Tier 2", flush=True)
+            print(
+                f"flush.py: Tier 1 failed ({type(e).__name__}), trying Tier 2",
+                flush=True,
+            )
 
     # Tier 2: ANTHROPIC_API_KEY
     if raw is None and os.environ.get("ANTHROPIC_API_KEY"):
@@ -298,7 +318,10 @@ def extract_knowledge(transcript: str) -> dict | None:
                 write_cost_log("tier2-api", 0.0)  # direct API cost not tracked here
         except Exception as e:
             logging.error(f"Tier 2 failed: {e}")
-            print(f"flush.py: Tier 2 failed ({type(e).__name__}), trying Tier 3", flush=True)
+            print(
+                f"flush.py: Tier 2 failed ({type(e).__name__}), trying Tier 3",
+                flush=True,
+            )
 
     # Tier 3: claude -p subprocess
     if raw is None:
@@ -321,12 +344,18 @@ def extract_knowledge(transcript: str) -> dict | None:
     try:
         return json.loads(raw.strip())
     except json.JSONDecodeError as e:
-        logging.error(f"Failed to parse extraction JSON: {e}\nRaw response:\n{raw[:500]}")
+        logging.error(
+            f"Failed to parse extraction JSON: {e}\nRaw response:\n{raw[:500]}"
+        )
         return None
+
 
 # ── Daily log writer ───────────────────────────────────────────────────────────
 
-def write_daily_log(knowledge: dict, date: datetime.date, transcript_path: str = "") -> Path:
+
+def write_daily_log(
+    knowledge: dict, date: datetime.date, transcript_path: str = ""
+) -> Path:
     """Append extracted knowledge to today's daily log.
 
     Uses fcntl.flock (non-blocking) to serialize concurrent writes from
@@ -348,45 +377,47 @@ compiled: false
 # Session Log — {date.strftime("%A, %B %d, %Y")}
 """)
 
-    sections.append(f"\n## Session extracted at {now}\n**source:** {Path(transcript_path).name}\n")
+    sections.append(
+        f"\n## Session extracted at {now}\n**source:** {Path(transcript_path).name}\n"
+    )
 
     for item in knowledge.get("decisions", []):
         sections.append(f"""\
-### [DECISION] {item['title']}
-**Summary:** {item['summary']}
-**Rationale:** {item['rationale']}
-**Tags:** {', '.join(item.get('tags', []))}
+### [DECISION] {item["title"]}
+**Summary:** {item["summary"]}
+**Rationale:** {item["rationale"]}
+**Tags:** {", ".join(item.get("tags", []))}
 """)
 
     for item in knowledge.get("patterns", []):
         sections.append(f"""\
-### [PATTERN] {item['title']}
-**Summary:** {item['summary']}
-**When to use:** {item['when_to_use']}
-**Tags:** {', '.join(item.get('tags', []))}
+### [PATTERN] {item["title"]}
+**Summary:** {item["summary"]}
+**When to use:** {item["when_to_use"]}
+**Tags:** {", ".join(item.get("tags", []))}
 """)
 
     for item in knowledge.get("mistakes", []):
         sections.append(f"""\
-### [MISTAKE] {item['title']}
-**Summary:** {item['summary']}
-**Root cause:** {item['root_cause']}
-**Fix:** {item['fix']}
-**Tags:** {', '.join(item.get('tags', []))}
+### [MISTAKE] {item["title"]}
+**Summary:** {item["summary"]}
+**Root cause:** {item["root_cause"]}
+**Fix:** {item["fix"]}
+**Tags:** {", ".join(item.get("tags", []))}
 """)
 
     for item in knowledge.get("concepts", []):
         sections.append(f"""\
-### [CONCEPT] {item['title']}
-**Summary:** {item['summary']}
-**Tags:** {', '.join(item.get('tags', []))}
+### [CONCEPT] {item["title"]}
+**Summary:** {item["summary"]}
+**Tags:** {", ".join(item.get("tags", []))}
 """)
 
     for item in knowledge.get("project_updates", []):
         sections.append(f"""\
-### [PROJECT] {item['project']}
-**Update:** {item['update']}
-**Tags:** {', '.join(item.get('tags', []))}
+### [PROJECT] {item["project"]}
+**Update:** {item["update"]}
+**Tags:** {", ".join(item.get("tags", []))}
 """)
 
     total = sum(
@@ -410,12 +441,15 @@ compiled: false
 
     return log_path
 
+
 # ── After-6pm compile trigger ─────────────────────────────────────────────────
+
 
 def maybe_trigger_compile() -> None:
     """If it's after 6 PM, kick off compile.py as a background process."""
     if datetime.datetime.now().hour >= 18:
         import subprocess
+
         compile_script = Path(__file__).parent / "compile.py"
         subprocess.Popen(
             [sys.executable, str(compile_script)],
@@ -425,7 +459,9 @@ def maybe_trigger_compile() -> None:
         )
         logging.info("Triggered compile.py (post-6pm)")
 
+
 # ── Transcript discovery ───────────────────────────────────────────────────────
+
 
 def find_latest_transcript() -> str | None:
     """Find the most recently modified Claude session transcript."""
@@ -434,8 +470,7 @@ def find_latest_transcript() -> str | None:
         return None
 
     candidates = [
-        p for p in projects_dir.glob("*/*.jsonl")
-        if "subagents" not in p.parts
+        p for p in projects_dir.glob("*/*.jsonl") if "subagents" not in p.parts
     ]
 
     if not candidates:
@@ -447,6 +482,7 @@ def find_latest_transcript() -> str | None:
 
 # ── Dedup guard ───────────────────────────────────────────────────────────────
 
+
 def already_processed_today(transcript_path: str) -> bool:
     """Return True if this transcript's filename appears in today's daily log."""
     filename = Path(transcript_path).name
@@ -457,6 +493,7 @@ def already_processed_today(transcript_path: str) -> bool:
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
+
 
 def main() -> None:
     setup_logging()
@@ -476,7 +513,8 @@ def main() -> None:
 
     try:
         transcript_path = (
-            sys.argv[1] if len(sys.argv) > 1
+            sys.argv[1]
+            if len(sys.argv) > 1
             else os.environ.get("CLAUDE_TRANSCRIPT_PATH", "")
         )
 
