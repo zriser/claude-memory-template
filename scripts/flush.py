@@ -85,6 +85,11 @@ Output a JSON object with this exact structure (no markdown fences):
   ]
 }
 
+For project_updates: capture any meaningful progress, blockers, or pivots on a named project.
+Examples: "made progress on X", "deployed Y", "blocked on Z", "paused after finishing X".
+The "project" field should match a project name (matching a file in work/active/).
+These are the signal compile.py uses to keep work/active/ files current.
+
 Return an empty array for any category with nothing worth capturing.
 Keep each item concise — 2-4 sentences max per field.
 
@@ -462,21 +467,50 @@ def maybe_trigger_compile() -> None:
 
 # ── Transcript discovery ───────────────────────────────────────────────────────
 
+# SessionEnd does not reliably pass CLAUDE_TRANSCRIPT_PATH in all environments
+# (e.g. some hook runners leave it empty). When that happens we fall back to
+# finding the single transcript that was just active, identified by a recency
+# window. We use 60 seconds — tight enough to avoid picking up stale files from
+# earlier sessions, wide enough to survive slow hook dispatch.
+FALLBACK_RECENCY_SECS = 60
+
 
 def find_latest_transcript() -> str | None:
-    """Find the most recently modified Claude session transcript."""
+    """Find the single most-recently-modified transcript touched in the last 60s.
+
+    Returns None (with a logged warning) if no file qualifies, so we never
+    accidentally process a stale transcript from an older session.
+    """
     projects_dir = Path.home() / ".claude" / "projects"
     if not projects_dir.exists():
+        logging.warning("Transcript fallback: ~/.claude/projects/ does not exist")
         return None
 
-    candidates = [
-        p for p in projects_dir.glob("*/*.jsonl") if "subagents" not in p.parts
+    import time
+
+    cutoff = time.time() - FALLBACK_RECENCY_SECS
+
+    recent = [
+        p
+        for p in projects_dir.glob("*/*.jsonl")
+        if "subagents" not in p.parts and p.stat().st_mtime >= cutoff
     ]
 
-    if not candidates:
+    if not recent:
+        logging.warning(
+            f"Transcript fallback: no .jsonl file modified in the last "
+            f"{FALLBACK_RECENCY_SECS}s — assuming no active session to process"
+        )
         return None
 
-    latest = max(candidates, key=lambda p: p.stat().st_mtime)
+    if len(recent) > 1:
+        logging.warning(
+            f"Transcript fallback: {len(recent)} files modified in the last "
+            f"{FALLBACK_RECENCY_SECS}s — picking the newest one"
+        )
+
+    latest = max(recent, key=lambda p: p.stat().st_mtime)
+    logging.info(f"Transcript fallback: selected {latest}")
     return str(latest)
 
 
@@ -521,7 +555,13 @@ def main() -> None:
         if not transcript_path:
             logging.warning(
                 "No transcript path provided via argv or CLAUDE_TRANSCRIPT_PATH — "
-                "the hook should supply this. Exiting without processing."
+                "attempting recency-based fallback"
+            )
+            transcript_path = find_latest_transcript() or ""
+
+        if not transcript_path:
+            logging.warning(
+                "Transcript fallback found nothing — exiting without processing"
             )
             sys.exit(0)
 
