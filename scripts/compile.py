@@ -18,6 +18,7 @@ import os
 import re
 import signal
 import sys
+import time
 import traceback
 from pathlib import Path
 
@@ -38,8 +39,13 @@ COST_WARN_USD = 0.50
 # NOTE: This is a write-gate, not a spend-gate. Cost is already incurred before
 # this threshold is checked; only the result write is aborted.
 COST_ABORT_USD = 1.00
-WALL_CLOCK_LIMIT = 300  # seconds — SIGALRM kills the process if exceeded
-SDK_TIMEOUT = 300  # asyncio.wait_for timeout for _compile_with_sdk
+# Activity-based timeout: SIGALRM fires if no SDK message arrives for IDLE_TIMEOUT
+# seconds. Each message (tool use, streamed text, result) resets the alarm, so an
+# agent that's actively writing files never gets killed. WALL_CLOCK_LIMIT is an
+# absolute cap checked inline as a safety net against runaway loops.
+IDLE_TIMEOUT = 180
+WALL_CLOCK_LIMIT = 1200
+SDK_TIMEOUT = 1200  # asyncio.wait_for safety net
 
 # ── SDK availability ───────────────────────────────────────────────────────────
 
@@ -70,7 +76,7 @@ def setup_logging() -> None:
 
 def _timeout_handler(signum: int, frame) -> None:
     logging.error(
-        f"compile.py exceeded {WALL_CLOCK_LIMIT}s wall-clock limit — aborting"
+        f"compile.py idle for {IDLE_TIMEOUT}s (no SDK progress) — aborting"
     )
     sys.exit(1)
 
@@ -212,6 +218,7 @@ async def _compile_with_sdk_inner(logs: list[Path], dry_run: bool) -> float:
         prompt += "\n\nDRY RUN: Describe what you WOULD write but do not actually create or edit any files."
 
     total_cost = 0.0
+    start = time.monotonic()
     async for message in sdk_query(
         prompt=prompt,
         options=ClaudeAgentOptions(
@@ -222,6 +229,18 @@ async def _compile_with_sdk_inner(logs: list[Path], dry_run: bool) -> float:
             max_turns=30,
         ),
     ):
+        # Activity watchdog: each message proves the agent is still making
+        # progress, so push the idle alarm out another IDLE_TIMEOUT seconds.
+        signal.alarm(IDLE_TIMEOUT)
+
+        # Absolute cap: guards against a pathological loop where the agent
+        # keeps emitting messages forever without completing.
+        if time.monotonic() - start > WALL_CLOCK_LIMIT:
+            logging.error(
+                f"compile.py exceeded {WALL_CLOCK_LIMIT}s absolute cap — breaking"
+            )
+            break
+
         if isinstance(message, AssistantMessage):
             for block in message.content:
                 if isinstance(block, TextBlock) and block.text.strip():
@@ -400,7 +419,7 @@ def _compile_with_api(logs: list[Path], dry_run: bool) -> int:
         client = anthropic.Anthropic(api_key=api_key)
         response = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=8192,
+            max_tokens=32000,
             messages=[{"role": "user", "content": FALLBACK_COMPILE_PROMPT + combined}],
         )
         raw = response.content[0].text.strip()
@@ -452,9 +471,11 @@ def main() -> None:
         logging.info("Another compile.py is already running — exiting")
         sys.exit(0)
 
-    # ── Wall-clock timeout via SIGALRM ────────────────────────────────────
+    # ── Idle-activity timeout via SIGALRM ─────────────────────────────────
+    # Alarm fires only if IDLE_TIMEOUT passes without the SDK yielding any
+    # message. Every message resets the alarm (see _compile_with_sdk_inner).
     signal.signal(signal.SIGALRM, _timeout_handler)
-    signal.alarm(WALL_CLOCK_LIMIT)
+    signal.alarm(IDLE_TIMEOUT)
 
     try:
         logs = get_uncompiled_logs()
