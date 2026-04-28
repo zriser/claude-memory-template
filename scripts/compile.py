@@ -490,17 +490,30 @@ def main() -> None:
 
         success = False
 
+        # Force subscription auth on Tier 1 by stashing ANTHROPIC_API_KEY.
+        # The bundled Claude Code CLI prefers the env key over `claude /login`
+        # subscription credentials when both are present, so leaving it set
+        # silently routes runs to paid API billing. Restored before Tier 2.
+        saved_api_key = os.environ.pop("ANTHROPIC_API_KEY", None)
+
         # Tier 1: Agent SDK (agent writes files directly via tools)
         if AGENT_SDK_AVAILABLE:
-            print("Tier 1 — Claude Agent SDK (subscription credentials)")
-            logging.info("Compile path: Tier 1 (claude_agent_sdk)")
+            print("Tier 1 — Claude Agent SDK (subscription auth)")
+            logging.info("Compile path: Tier 1 (claude_agent_sdk, auth=subscription)")
             try:
                 cost = asyncio.run(_compile_with_sdk(logs, dry_run))
-                if not _check_cost(cost, "tier1-sdk"):
-                    logging.error("Aborting compile due to cost guard")
-                    sys.exit(1)
-                logging.info(f"Tier 1 compile complete. Cost: ${cost:.4f}")
-                print(f"\nCompile complete. Cost: ${cost:.4f}")
+                # Subscription is fixed-rate; reported cost is hypothetical
+                # API-equivalent, not actual billing. Log it for visibility but
+                # do not gate on the cost guard.
+                write_cost_log("tier1-sdk-sub", cost)
+                logging.info(
+                    f"Tier 1 compile complete (auth=subscription, $0 billed). "
+                    f"Hypothetical API cost: ${cost:.4f}"
+                )
+                print(
+                    f"\nCompile complete (subscription, $0 billed). "
+                    f"Hypothetical: ${cost:.4f}"
+                )
                 success = True
             except asyncio.TimeoutError:
                 logging.error(f"Tier 1 timed out after {SDK_TIMEOUT}s — trying Tier 2")
@@ -509,13 +522,18 @@ def main() -> None:
                 logging.error(f"Tier 1 failed: {e}\n{traceback.format_exc()}")
                 print(f"Tier 1 failed ({type(e).__name__}), trying Tier 2...")
 
+        # Restore the API key so Tier 2 / Tier 3 fallback can use it.
+        if saved_api_key:
+            os.environ["ANTHROPIC_API_KEY"] = saved_api_key
+
         # Tier 2: ANTHROPIC_API_KEY (JSON-based)
         if not success and os.environ.get("ANTHROPIC_API_KEY"):
-            print("Tier 2 — ANTHROPIC_API_KEY")
-            logging.info("Compile path: Tier 2 (anthropic SDK)")
+            print("Tier 2 — ANTHROPIC_API_KEY (paid)")
+            logging.info("Compile path: Tier 2 (anthropic SDK, auth=api)")
             count = _compile_with_api(logs, dry_run)
             if count:
                 write_cost_log("tier2-api", 0.0)
+                logging.info(f"Tier 2 compile complete (auth=api). Articles: {count}")
                 print(f"Compiled {count} article(s).")
                 success = True
             else:
