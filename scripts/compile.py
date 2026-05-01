@@ -422,8 +422,13 @@ def _update_memory(written: list[Path]) -> None:
         )
 
 
-def _compile_with_api(logs: list[Path], dry_run: bool) -> int:
-    """Fallback: use direct Anthropic API to return JSON, then write files."""
+def _compile_with_api(logs: list[Path], dry_run: bool, api_key: str) -> int:
+    """Fallback: use direct Anthropic API to return JSON, then write files.
+
+    api_key is passed in explicitly rather than read from os.environ so the
+    caller can keep the key out of the process env (which the bundled Claude
+    Code CLI in Tier 3 would otherwise pick up and silently bill against).
+    """
     try:
         import anthropic
     except ImportError:
@@ -431,11 +436,6 @@ def _compile_with_api(logs: list[Path], dry_run: bool) -> int:
             "ERROR: neither claude_agent_sdk nor anthropic package is installed",
             file=sys.stderr,
         )
-        return 0
-
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        print("ERROR: Fallback requires ANTHROPIC_API_KEY env var", file=sys.stderr)
         return 0
 
     combined = "\n\n".join(extract_log_content(lf) for lf in logs)
@@ -490,6 +490,7 @@ def _compile_with_api(logs: list[Path], dry_run: bool) -> int:
 
 def main() -> None:
     dry_run = "--dry-run" in sys.argv
+    use_api = "--use-api" in sys.argv
     setup_logging()
 
     if dry_run:
@@ -522,10 +523,12 @@ def main() -> None:
 
         success = False
 
-        # Force subscription auth on Tier 1 by stashing ANTHROPIC_API_KEY.
-        # The bundled Claude Code CLI prefers the env key over `claude /login`
-        # subscription credentials when both are present, so leaving it set
-        # silently routes runs to paid API billing. Restored before Tier 2.
+        # Pop ANTHROPIC_API_KEY out of the process env for the entire run.
+        # The bundled Claude Code CLI used by Tier 1 (via the SDK) and Tier 3
+        # (via `claude -p`) prefers an env key over `claude /login` subscription
+        # credentials when both are present — leaving it set silently routes
+        # runs to paid API billing. Tier 2 (the only paid path) gets the key
+        # passed in as a function argument, so it never goes back into env.
         saved_api_key = os.environ.pop("ANTHROPIC_API_KEY", None)
 
         # Tier 1: Agent SDK (agent writes files directly via tools)
@@ -548,38 +551,45 @@ def main() -> None:
                 )
                 success = True
             except asyncio.TimeoutError:
-                logging.error(f"Tier 1 timed out after {SDK_TIMEOUT}s — trying Tier 2")
-                print(f"Tier 1 timed out after {SDK_TIMEOUT}s, trying Tier 2...")
+                logging.error(f"Tier 1 timed out after {SDK_TIMEOUT}s — trying fallback")
+                print(f"Tier 1 timed out after {SDK_TIMEOUT}s, trying fallback...")
             except Exception as e:
                 logging.error(f"Tier 1 failed: {e}\n{traceback.format_exc()}")
-                print(f"Tier 1 failed ({type(e).__name__}), trying Tier 2...")
-
-        # Restore the API key so Tier 2 / Tier 3 fallback can use it.
-        if saved_api_key:
-            os.environ["ANTHROPIC_API_KEY"] = saved_api_key
+                print(f"Tier 1 failed ({type(e).__name__}), trying fallback...")
 
         # Tier 2/3 don't yield SDK messages, so the idle SIGALRM never resets
         # and would kill the process mid-call. Cancel the alarm before falling
         # through; each fallback tier has its own bounded timeout.
         signal.alarm(0)
 
-        # Tier 2: ANTHROPIC_API_KEY (JSON-based)
-        if not success and os.environ.get("ANTHROPIC_API_KEY"):
-            print("Tier 2 — ANTHROPIC_API_KEY (paid)")
-            logging.info("Compile path: Tier 2 (anthropic SDK, auth=api)")
-            count = _compile_with_api(logs, dry_run)
+        # Tier 2: ANTHROPIC_API_KEY (JSON-based, PAID — opt-in only).
+        # Streams up to 32k tokens to completion before parsing, so a parse
+        # failure still bills the full response. Skipped unless --use-api.
+        if not success and use_api and saved_api_key:
+            print("Tier 2 — ANTHROPIC_API_KEY (PAID — explicit --use-api)")
+            logging.info("Compile path: Tier 2 (anthropic SDK, auth=api, opted in)")
+            count = _compile_with_api(logs, dry_run, saved_api_key)
             if count:
                 write_cost_log("tier2-api", 0.0)
                 logging.info(f"Tier 2 compile complete (auth=api). Articles: {count}")
                 print(f"Compiled {count} article(s).")
                 success = True
             else:
-                print("Tier 2 failed, trying Tier 3...")
+                print("Tier 2 failed (tokens still billed), trying Tier 3...")
+        elif not success and saved_api_key and not use_api:
+            logging.info(
+                "Tier 2 skipped: ANTHROPIC_API_KEY present but --use-api not set "
+                "(paid fallback is opt-in)"
+            )
+            print(
+                "Tier 2 skipped — pass --use-api to allow the paid fallback. "
+                "Falling through to Tier 3 (subscription)."
+            )
 
-        # Tier 3: claude -p subprocess (JSON-based, same as Tier 2 but different transport)
+        # Tier 3: claude -p subprocess (subscription auth — env key was popped above).
         if not success:
-            print("Tier 3 — claude -p subprocess fallback")
-            logging.info("Compile path: Tier 3 (claude -p)")
+            print("Tier 3 — claude -p subprocess fallback (subscription auth)")
+            logging.info("Compile path: Tier 3 (claude -p, auth=subscription)")
             combined = "\n\n".join(extract_log_content(lf) for lf in logs)
             if len(combined) > 100_000:
                 combined = combined[-100_000:]
