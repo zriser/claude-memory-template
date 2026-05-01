@@ -118,8 +118,21 @@ def _check_cost(cost_usd: float, tier: str) -> bool:
 # ── Uncompiled log detection ───────────────────────────────────────────────────
 
 
+def _frontmatter(content: str) -> str:
+    """Return the YAML frontmatter block, or '' if none."""
+    if not content.startswith("---"):
+        return ""
+    parts = content.split("---", 2)
+    return parts[1] if len(parts) >= 3 else ""
+
+
 def get_uncompiled_logs() -> list[Path]:
-    """Return daily log files that have content but haven't been compiled."""
+    """Return daily log files that have content but haven't been compiled.
+
+    `compiled:` is checked in frontmatter only — postmortem prose elsewhere in
+    the body legitimately mentions "compiled: false" and would otherwise flag
+    the log as uncompiled forever.
+    """
     logs = []
     for log_file in sorted(DAILY_DIR.glob("*.md")):
         content = log_file.read_text(encoding="utf-8")
@@ -133,7 +146,11 @@ def get_uncompiled_logs() -> list[Path]:
                 "[PROJECT]",
             )
         )
-        is_uncompiled = "compiled: false" in content or "compiled:" not in content
+        fm = _frontmatter(content)
+        is_uncompiled = (
+            re.search(r"^\s*compiled:\s*false\b", fm, re.MULTILINE) is not None
+            or re.search(r"^\s*compiled:\s*", fm, re.MULTILINE) is None
+        )
         if has_content and is_uncompiled:
             logs.append(log_file)
     return logs
@@ -219,6 +236,15 @@ async def _compile_with_sdk_inner(logs: list[Path], dry_run: bool) -> float:
 
     total_cost = 0.0
     start = time.monotonic()
+
+    def _log_cli_stderr(line: str) -> None:
+        # Bundled CLI's stderr is otherwise swallowed; the SDK only surfaces
+        # a generic "Check stderr output for details" on crash. Capturing here
+        # turns the next Tier 1 failure into a diagnosable error.
+        line = line.rstrip()
+        if line:
+            logging.warning(f"[tier1 cli stderr] {line}")
+
     async for message in sdk_query(
         prompt=prompt,
         options=ClaudeAgentOptions(
@@ -227,6 +253,7 @@ async def _compile_with_sdk_inner(logs: list[Path], dry_run: bool) -> float:
             allowed_tools=["Read", "Write", "Edit", "Glob", "Grep"],
             permission_mode="acceptEdits",
             max_turns=30,
+            stderr=_log_cli_stderr,
         ),
     ):
         # Activity watchdog: each message proves the agent is still making
@@ -416,13 +443,18 @@ def _compile_with_api(logs: list[Path], dry_run: bool) -> int:
         combined = combined[-100_000:]
 
     try:
+        # Streaming is required when max_tokens may produce a >10-min response;
+        # Anthropic's client rejects non-streaming calls at this size client-side.
         client = anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
+        chunks: list[str] = []
+        with client.messages.stream(
             model="claude-sonnet-4-6",
             max_tokens=32000,
             messages=[{"role": "user", "content": FALLBACK_COMPILE_PROMPT + combined}],
-        )
-        raw = response.content[0].text.strip()
+        ) as stream:
+            for text in stream.text_stream:
+                chunks.append(text)
+        raw = "".join(chunks).strip()
         if raw.startswith("```"):
             raw = raw.split("```", 2)[1]
             if raw.startswith("json"):
@@ -525,6 +557,11 @@ def main() -> None:
         # Restore the API key so Tier 2 / Tier 3 fallback can use it.
         if saved_api_key:
             os.environ["ANTHROPIC_API_KEY"] = saved_api_key
+
+        # Tier 2/3 don't yield SDK messages, so the idle SIGALRM never resets
+        # and would kill the process mid-call. Cancel the alarm before falling
+        # through; each fallback tier has its own bounded timeout.
+        signal.alarm(0)
 
         # Tier 2: ANTHROPIC_API_KEY (JSON-based)
         if not success and os.environ.get("ANTHROPIC_API_KEY"):
