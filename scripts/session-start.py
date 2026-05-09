@@ -135,6 +135,27 @@ def rotate_session_backups(max_age_days: int = 30) -> None:
             pass
 
 
+def prune_compiled_daily_logs(max_age_days: int = 60) -> None:
+    """Delete daily/*.md files older than max_age_days that compile.py has marked done.
+
+    Daily logs are a pipeline intermediate — once compiled, their content lives in
+    wiki/brain/patterns/mistakes notes. The raw JSONL in sessions/backup-*.jsonl
+    (and git history) remain as audit trail.
+    """
+    if not DAILY_DIR.exists():
+        return
+    cutoff = datetime.datetime.now().timestamp() - max_age_days * 86400
+    for log in DAILY_DIR.glob("*.md"):
+        try:
+            if log.stat().st_mtime >= cutoff:
+                continue
+            if "compiled: true" not in log.read_text(encoding="utf-8"):
+                continue
+            log.unlink()
+        except OSError:
+            pass
+
+
 def build_context() -> str:
     """Assemble the full context string."""
     sections = []
@@ -167,6 +188,7 @@ def build_context() -> str:
 
 def main():
     rotate_session_backups()
+    prune_compiled_daily_logs()
     try:
         context = build_context()
 

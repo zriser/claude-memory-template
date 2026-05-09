@@ -37,7 +37,20 @@ SEARCH_DIRS = [
     VAULT / "patterns",
     VAULT / "mistakes",
     VAULT / "daily",
+    VAULT / "work",
+    VAULT / "sessions",
+    VAULT / "dashboard",
+    VAULT / "templates",
 ]
+
+# Folders whose contents are loaded (so they resolve wikilinks TO them) but
+# excluded from orphan + missing-frontmatter + stale checks — they're tooling
+# or scaffolding, not curated content:
+EXCLUDED_FROM_CHECKS = {"dashboard", "templates", "raw"}
+
+# Root-level meta files — loaded so they count as linkers in orphan checks,
+# but never held to frontmatter / stale / orphan content standards themselves:
+ROOT_META_FILES = {"CLAUDE.md", "MEMORY.md", "README.md", "TODO.md", "AUDIT.md"}
 
 # ── SDK availability ───────────────────────────────────────────────────────────
 
@@ -56,18 +69,35 @@ if AGENT_SDK_AVAILABLE:
 
 def load_all_articles() -> dict[str, str]:
     articles = {}
+    # Scan search dirs first
     for search_dir in SEARCH_DIRS:
         for md_file in search_dir.rglob("*.md"):
             rel = str(md_file.relative_to(VAULT))
             articles[rel] = md_file.read_text(encoding="utf-8")
+    # Also scan root-level curated files (CLAUDE.md, MEMORY.md, README.md, etc.)
+    # so they count as linkers for orphan detection.
+    for md_file in VAULT.glob("*.md"):
+        rel = str(md_file.relative_to(VAULT))
+        articles[rel] = md_file.read_text(encoding="utf-8")
     return articles
 
 
 def build_slug_map(articles: dict[str, str]) -> dict[str, str]:
+    """Map wikilink-resolvable identifiers to their canonical path.
+
+    Obsidian resolves [[link]] using any of: bare filename, path-without-ext, or
+    frontmatter title. Match all three so path-style wikilinks like
+    [[brain/people/kristen-wagner]] aren't reported as broken.
+    """
     slug_map = {}
     for path, content in articles.items():
         stem = Path(path).stem
         slug_map[stem] = path
+        slug_map[stem.lower()] = path
+        # Index by path without extension (supports [[brain/people/foo]] style)
+        path_no_ext = path[:-3] if path.endswith(".md") else path
+        slug_map[path_no_ext] = path
+        slug_map[path_no_ext.lower()] = path
         title_match = re.search(
             r'^title:\s*["\']?(.+?)["\']?\s*$', content, re.MULTILINE
         )
@@ -78,6 +108,35 @@ def build_slug_map(articles: dict[str, str]) -> dict[str, str]:
     return slug_map
 
 
+def _wikilink_target(raw: str) -> str:
+    """Strip any |alias and any #heading suffix from a wikilink body."""
+    return raw.split("|", 1)[0].split("#", 1)[0].strip()
+
+
+_REDIRECT_RE = re.compile(
+    r"^\s*<!--\s*(Redirect|Duplicate)\b",
+    re.IGNORECASE,
+)
+
+
+def _strip_code(content: str) -> str:
+    """Remove fenced code blocks and inline code spans so lint doesn't
+    mistake `[[literal]]` examples in code for real wikilinks."""
+    content = re.sub(r"```[\s\S]*?```", "", content)
+    content = re.sub(r"`[^`\n]+`", "", content)
+    return content
+
+
+def _is_redirect_stub(content: str) -> bool:
+    """True if the file's first non-empty line is a Redirect/Duplicate comment."""
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        return bool(_REDIRECT_RE.match(stripped))
+    return False
+
+
 # ── Static checks (no AI needed) ─────────────────────────────────────────────
 
 
@@ -85,32 +144,55 @@ def check_broken_links(articles: dict[str, str]) -> list[str]:
     slug_map = build_slug_map(articles)
     issues = []
     for path, content in articles.items():
-        for link in re.findall(r"\[\[([^\]]+)\]\]", content):
-            link = link.strip()
-            if link not in slug_map and link.lower() not in slug_map:
-                issues.append(f"BROKEN LINK: `[[{link}]]` in `{path}`")
+        scan = _strip_code(content)
+        for link in re.findall(r"\[\[([^\]]+)\]\]", scan):
+            target = _wikilink_target(link)
+            if target in slug_map or target.lower() in slug_map:
+                continue
+            issues.append(f"BROKEN LINK: `[[{link}]]` in `{path}`")
     return issues
 
 
 def check_orphaned_notes(articles: dict[str, str]) -> list[str]:
-    referenced: set[str] = set()
+    """Find notes that no other note references via any wikilink shape.
+
+    Counts a note as referenced if any inbound wikilink resolves to it via
+    the slug_map (stem, path-without-ext, title, or lowercase forms).
+    """
+    slug_map = build_slug_map(articles)
+    referenced_paths: set[str] = set()
     for content in articles.values():
-        for link in re.findall(r"\[\[([^\]]+)\]\]", content):
-            referenced.add(link.strip())
-            referenced.add(link.strip().lower())
-        for link in re.findall(r"\[.*?\]\(([^)]+)\)", content):
-            referenced.add(link.strip())
+        scan = _strip_code(content)
+        for link in re.findall(r"\[\[([^\]]+)\]\]", scan):
+            target = _wikilink_target(link)
+            if target in slug_map:
+                referenced_paths.add(slug_map[target])
+            elif target.lower() in slug_map:
+                referenced_paths.add(slug_map[target.lower()])
+        # Markdown-style links like [text](../path/file.md)
+        for link in re.findall(r"\[.*?\]\(([^)]+\.md)\)", scan):
+            link = link.strip()
+            # Normalize ../ prefix to vault-root-relative path
+            cleaned = link.lstrip("./")
+            # If the cleaned value matches an article key, count it
+            if cleaned in articles:
+                referenced_paths.add(cleaned)
 
     issues = []
-    for path in articles:
+    for path, content in articles.items():
         if Path(path).name == "index.md" or path.startswith("daily/"):
             continue
-        stem = Path(path).stem
-        if (
-            stem not in referenced
-            and stem.lower() not in referenced
-            and path not in referenced
-        ):
+        # Root-level meta files (CLAUDE.md, MEMORY.md, etc.) are meta, not content
+        if "/" not in path and path in ROOT_META_FILES:
+            continue
+        # Exclude scaffolding folders
+        first_part = path.split("/", 1)[0]
+        if first_part in EXCLUDED_FROM_CHECKS:
+            continue
+        # Skip redirect stubs — they intentionally hold no content
+        if _is_redirect_stub(content):
+            continue
+        if path not in referenced_paths:
             issues.append(f"ORPHAN: `{path}` has no incoming links")
     return issues
 
@@ -121,6 +203,16 @@ def check_stale_notes(articles: dict[str, str]) -> list[str]:
     issues = []
     for path, content in articles.items():
         if path.startswith("daily/"):
+            continue
+        # Root-level meta files don't get stale checks
+        if "/" not in path and path in ROOT_META_FILES:
+            continue
+        # Scaffolding folders skipped here too
+        first_part = path.split("/", 1)[0]
+        if first_part in EXCLUDED_FROM_CHECKS:
+            continue
+        # Redirect stubs don't need dates
+        if _is_redirect_stub(content):
             continue
         updated = re.search(r"^updated:\s*(\d{4}-\d{2}-\d{2})", content, re.MULTILINE)
         created = re.search(r"^created:\s*(\d{4}-\d{2}-\d{2})", content, re.MULTILINE)
@@ -141,10 +233,21 @@ def check_stale_notes(articles: dict[str, str]) -> list[str]:
 
 
 def check_missing_frontmatter(articles: dict[str, str]) -> list[str]:
-    required = {"title", "category", "created", "updated"}
+    # category is optional now — folder encodes the category
+    required = {"title", "created", "updated"}
     issues = []
     for path, content in articles.items():
         if path.startswith("daily/") or Path(path).name == "index.md":
+            continue
+        # Root-level meta files (CLAUDE.md, MEMORY.md, etc.) don't need frontmatter
+        if "/" not in path and path in ROOT_META_FILES:
+            continue
+        # Skip scaffolding folders
+        first_part = path.split("/", 1)[0]
+        if first_part in EXCLUDED_FROM_CHECKS:
+            continue
+        # Redirect stubs intentionally hold no content; they're safe to skip
+        if _is_redirect_stub(content):
             continue
         if not content.startswith("---"):
             issues.append(f"NO FRONTMATTER: `{path}`")
@@ -161,7 +264,7 @@ def check_missing_frontmatter(articles: dict[str, str]) -> list[str]:
 # ── Contradiction check — Agent SDK (primary) ─────────────────────────────────
 
 SDK_CONTRADICTION_PROMPT = """\
-You are auditing the user's personal knowledge base at {vault} for quality issues.
+You are auditing Zach's personal knowledge base at {vault} for quality issues.
 
 Use Glob and Read tools to examine all articles in:
   wiki/, brain/, patterns/, mistakes/
