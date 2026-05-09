@@ -12,10 +12,16 @@ WARNING: Do NOT wire this to the Stop hook. Stop fires on every assistant
 response, not just at session end, causing O(N) concurrent process accumulation
 per session in tmux and other multiplexed environments. Use SessionEnd only.
 
-Primary:  claude_agent_sdk  (uses ~/.claude/.credentials.json — no API key needed)
-Fallback: anthropic SDK     (requires ANTHROPIC_API_KEY env var)
+Tier 1: claude_agent_sdk   (uses ~/.claude/.credentials.json — subscription, $0)
+Tier 2: anthropic SDK      (PAID — opt-in only via --use-api)
+Tier 3: `claude -p`        (subscription, $0 — fallback if Tier 1 fails)
 
-Usage: python3 flush.py [transcript_path]
+ANTHROPIC_API_KEY is popped from env at startup so it can never leak into
+Tier 1 or Tier 3 (the bundled CLI prefers an env key over subscription
+credentials). Tier 2 receives the saved key explicitly and only runs when
+--use-api is passed.
+
+Usage: python3 flush.py [transcript_path] [--use-api]
        Or set CLAUDE_TRANSCRIPT_PATH env var.
 """
 
@@ -87,7 +93,7 @@ Output a JSON object with this exact structure (no markdown fences):
 
 For project_updates: capture any meaningful progress, blockers, or pivots on a named project.
 Examples: "made progress on X", "deployed Y", "blocked on Z", "paused after finishing X".
-The "project" field should match a project name (matching a file in work/active/).
+The "project" field should match a project name (e.g. "claude-memory", "pulsewavetech-website", "pantrypal").
 These are the signal compile.py uses to keep work/active/ files current.
 
 Return an empty array for any category with nothing worth capturing.
@@ -237,17 +243,12 @@ async def _extract_with_sdk(transcript: str) -> tuple[str, float]:
 # ── Extraction — anthropic SDK (fallback) ─────────────────────────────────────
 
 
-def _extract_with_api(transcript: str) -> str | None:
-    """Fallback extraction via direct Anthropic API (requires ANTHROPIC_API_KEY)."""
+def _extract_with_api(transcript: str, api_key: str) -> str | None:
+    """Fallback extraction via direct Anthropic API (paid)."""
     try:
         import anthropic
     except ImportError:
         logging.error("Neither claude_agent_sdk nor anthropic package is installed")
-        return None
-
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        logging.error("Fallback failed: ANTHROPIC_API_KEY not set")
         return None
 
     try:
@@ -289,36 +290,49 @@ def _check_cost(cost_usd: float, tier: str) -> bool:
     return True
 
 
-def extract_knowledge(transcript: str) -> dict | None:
+def extract_knowledge(
+    transcript: str,
+    use_api: bool = False,
+    saved_api_key: str | None = None,
+) -> dict | None:
     """Extract knowledge, preferring Agent SDK, falling back to direct API.
 
-    Attempts each auth tier exactly once. No retry loop.
+    Attempts each auth tier exactly once. No retry loop. Tier 2 (paid API) is
+    skipped unless the caller explicitly opts in via use_api=True AND a key is
+    available — main() pops ANTHROPIC_API_KEY from env before calling, so the
+    key only flows through this explicit parameter, never silently via env.
     """
     raw: str | None = None
 
-    # Tier 1: Agent SDK
+    # Tier 1: Agent SDK (subscription auth — env key was popped by main()).
     if AGENT_SDK_AVAILABLE:
-        logging.info("Tier 1: Claude Agent SDK")
+        logging.info("Tier 1: Claude Agent SDK (subscription)")
         print(
             "flush.py: Tier 1 — Claude Agent SDK (subscription credentials)", flush=True
         )
         try:
             raw, cost = asyncio.run(_extract_with_sdk(transcript))
-            if not _check_cost(cost, "tier1-sdk"):
-                return None
+            # Subscription is fixed-rate; reported cost is hypothetical. Log it
+            # for visibility under tier1-sdk-sub but do not gate on the cost guard.
+            write_cost_log("tier1-sdk-sub", cost)
+            if cost:
+                logging.info(
+                    f"Tier 1 complete (auth=subscription, $0 billed). "
+                    f"Hypothetical API cost: ${cost:.4f}"
+                )
         except Exception as e:
             logging.error(f"Tier 1 failed: {e}\n{traceback.format_exc()}")
             print(
-                f"flush.py: Tier 1 failed ({type(e).__name__}), trying Tier 2",
+                f"flush.py: Tier 1 failed ({type(e).__name__}), trying fallback",
                 flush=True,
             )
 
-    # Tier 2: ANTHROPIC_API_KEY
-    if raw is None and os.environ.get("ANTHROPIC_API_KEY"):
-        logging.info("Tier 2: ANTHROPIC_API_KEY")
-        print("flush.py: Tier 2 — ANTHROPIC_API_KEY", flush=True)
+    # Tier 2: ANTHROPIC_API_KEY (PAID — opt-in only via --use-api).
+    if raw is None and use_api and saved_api_key:
+        logging.info("Tier 2: ANTHROPIC_API_KEY (PAID — explicit --use-api)")
+        print("flush.py: Tier 2 — ANTHROPIC_API_KEY (PAID)", flush=True)
         try:
-            raw = _extract_with_api(transcript)
+            raw = _extract_with_api(transcript, saved_api_key)
             if raw is not None:
                 write_cost_log("tier2-api", 0.0)  # direct API cost not tracked here
         except Exception as e:
@@ -327,6 +341,11 @@ def extract_knowledge(transcript: str) -> dict | None:
                 f"flush.py: Tier 2 failed ({type(e).__name__}), trying Tier 3",
                 flush=True,
             )
+    elif raw is None and saved_api_key and not use_api:
+        logging.info(
+            "Tier 2 skipped: ANTHROPIC_API_KEY present but --use-api not set "
+            "(paid fallback is opt-in)"
+        )
 
     # Tier 3: claude -p subprocess
     if raw is None:
@@ -546,9 +565,21 @@ def main() -> None:
     signal.alarm(WALL_CLOCK_LIMIT)
 
     try:
+        # Pop ANTHROPIC_API_KEY out of process env for the entire run. The
+        # bundled Claude Code CLI used by Tier 1 (via the SDK) and Tier 3 (via
+        # `claude -p`) prefers an env key over `claude /login` subscription
+        # credentials when both are present — leaving it set silently routes
+        # runs to paid API billing. Tier 2 (the only paid path) gets the key
+        # passed in as a function argument, so it never goes back into env.
+        saved_api_key = os.environ.pop("ANTHROPIC_API_KEY", None)
+
+        # Filter out flags so positional args still resolve correctly.
+        positional = [a for a in sys.argv[1:] if not a.startswith("--")]
+        use_api = "--use-api" in sys.argv
+
         transcript_path = (
-            sys.argv[1]
-            if len(sys.argv) > 1
+            positional[0]
+            if positional
             else os.environ.get("CLAUDE_TRANSCRIPT_PATH", "")
         )
 
@@ -582,7 +613,7 @@ def main() -> None:
 
         logging.info(f"Loaded transcript ({len(transcript)} chars)")
 
-        knowledge = extract_knowledge(transcript)
+        knowledge = extract_knowledge(transcript, use_api=use_api, saved_api_key=saved_api_key)
         if not knowledge:
             logging.error("Extraction failed — skipping daily log write")
             sys.exit(1)
